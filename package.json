@@ -1,0 +1,17 @@
+{
+  "name": "can-bus-replay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "星载载荷共用 CAN 总线位级仲裁/错误/总线关闭回放系统",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "build": "node scripts/build.cjs",
+    "test": "node --test test/",
+    "verify": "node scripts/verify.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>星载载荷共用 CAN 总线 · 位级仲裁/错误回放</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>星载载荷共用 CAN 总线 <span>位级仲裁 / 填充 / CRC / ACK / 错误标志 / 帧间隔回放</span></h1>
+    <div class="top-actions">
+      <button id="btn-sample-normal" class="btn ghost" type="button">载入：正常仲裁</button>
+      <button id="btn-sample-passive" class="btn ghost" type="button">载入：被动错误</button>
+      <button id="btn-sample-busoff" class="btn ghost" type="button">载入：bus-off 恢复</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左：录入 -->
+    <section class="panel input-panel">
+      <h2>① 审查录入</h2>
+
+      <div class="block">
+        <div class="block-head">
+          <h3>节点（至多 4 个）</h3>
+          <button id="btn-add-node" class="btn small" type="button">＋ 节点</button>
+        </div>
+        <div class="row header-row">
+          <span class="c-name">节点名称</span>
+          <span class="c-tec">初始 TEC</span>
+          <span class="c-op"></span>
+        </div>
+        <div id="nodes"></div>
+      </div>
+
+      <div class="block">
+        <div class="block-head">
+          <h3>标准数据帧请求（至多 24 条，按时刻排列）</h3>
+          <button id="btn-add-req" class="btn small" type="button">＋ 请求</button>
+        </div>
+        <div class="row header-row req-head">
+          <span class="q-time">时刻</span>
+          <span class="q-node">发送节点</span>
+          <span class="q-id">ID(0x)</span>
+          <span class="q-dlc">DLC</span>
+          <span class="q-data">数据(HEX)</span>
+          <span class="q-err">错误标注</span>
+          <span class="q-op"></span>
+        </div>
+        <div id="requests"></div>
+      </div>
+
+      <div class="actions">
+        <button id="btn-run" class="btn primary" type="button">▶ 执行回放仿真</button>
+        <button id="btn-clear" class="btn" type="button">清空</button>
+        <span id="count-info" class="muted"></span>
+      </div>
+
+      <div id="field-errors" class="errors hidden"></div>
+    </section>
+
+    <!-- 右：结果 -->
+    <section class="panel result-panel">
+      <h2>② 回放结论</h2>
+      <div id="stale-hint" class="stale hidden">当前输入存在字段错误，以下旧结论已清除。</div>
+
+      <div id="summary" class="summary hidden">
+        <div class="stat-cards" id="stat-cards"></div>
+        <div class="events-box">
+          <h3>总线状态事件</h3>
+          <div id="event-log"></div>
+        </div>
+        <div class="req-outcomes">
+          <h3>请求结局</h3>
+          <table id="outcomes-table">
+            <thead><tr><th>#</th><th>时刻</th><th>节点</th><th>ID</th><th>结局</th><th>尝试次数</th><th>说明</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="attempts" class="attempts">
+        <p class="muted placeholder">录入节点与请求后点击「执行回放仿真」，每帧（含重传）将显示获胜节点、错误来源、计数变化、首个违规证据与可展开的逐位轨迹。</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- 位回放弹层 -->
+  <div id="trace-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 id="trace-title">位序轨迹</h3>
+        <button id="trace-close" class="btn small" type="button">关闭</button>
+      </div>
+      <div class="trace-controls">
+        <button id="tr-play" class="btn small" type="button">⏸ 暂停</button>
+        <button id="tr-step" class="btn small" type="button">单步 ▶|</button>
+        <button id="tr-first" class="btn small" type="button">|◀ 起点</button>
+        <label class="speed">速度
+          <select id="tr-speed">
+            <option value="8">极快</option>
+            <option value="32" selected>正常</option>
+            <option value="120">慢速</option>
+          </select>
+        </label>
+        <input id="tr-slider" type="range" min="0" max="0" value="0" />
+        <span id="tr-pos" class="mono"></span>
+      </div>
+      <div id="tr-legend" class="legend"></div>
+      <div id="tr-detail" class="tr-detail mono"></div>
+      <div id="tr-track" class="tr-track mono"></div>
+      <div class="trace-fields" id="tr-fields"></div>
+    </div>
+  </div>
+
+  <script src="/engine.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
