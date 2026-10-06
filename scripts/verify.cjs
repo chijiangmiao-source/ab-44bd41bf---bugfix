@@ -5,7 +5,9 @@
  *   阶段 1  node --test 全量代码测试（仲裁 / 填充 / CRC / ACK / 被动错误 / bus-off 恢复 / 字段校验）
  *   阶段 2  构建检查（语法 + 页面资源 + dist 产出）
  *   阶段 3  启动真实 HTTP 服务，健康检查与页面资源冒烟
- *   阶段 4  通过 HTTP API 验证三类可观察结果：正常仲裁 / 被动错误 / bus-off 恢复
+ *   阶段 4  通过 HTTP API 验证可观察结果：
+ *           正常仲裁 / 被动错误 / bus-off 恢复 /
+ *           相同 ID 载荷首位差异 / 相同 ID DLC 差异 / 相同 ID 整帧一致 / 持续冲突 bus-off 终止
  *
  * 任一阶段失败即以非零码退出，退出码如实反映验收结果。
  */
@@ -185,8 +187,7 @@ async function main() {
         rec.atBit > off.atBit + 1408, `off=${off.atBit} rec=${rec.atBit}`);
     }
 
-    section('阶段 4d：非法输入字段级反馈（并确认不产生结论）');
-    const bad = await api({
+    section('阶段 4d：非法输入字段级反馈（并确认不产生结论）');    const bad = await api({
       nodes: [{ name: 'A' }],
       requests: [{ node: 'A', id: '0x800', dlc: 2, data: [1, 2, 3], error: { type: 'bit', dataBit: 99 } }],
     });
@@ -196,6 +197,116 @@ async function main() {
       bad.body.errors.some((e) => e.field.includes('.data')) &&
       bad.body.errors.some((e) => e.field.includes('dataBit')));
     check('响应不含旧结论字段', bad.body.attempts === undefined);
+
+    /* ---------- 阶段 4e：相同标识符 + 载荷首位差异 ---------- */
+    section('阶段 4e：相同标识符 · 载荷首位差异（首个分歧位必须形成可复核错误结论）');
+    const payloadDiff = await api({
+      nodes: [{ name: 'A', tec: 0 }, { name: 'B', tec: 0 }, { name: 'C', tec: 0 }],
+      requests: [
+        { time: 0, node: 'A', id: '0x100', dlc: 1, data: '00' }, // D0.7=0
+        { time: 0, node: 'B', id: '0x100', dlc: 1, data: '80' }, // D0.7=1
+      ],
+    });
+    check('API 返回 200', payloadDiff.status === 200);
+    {
+      const r = payloadDiff.body;
+      const a0 = r.attempts[0];
+      check('仲裁场未分胜负（无虚假仲裁败者证据）', a0.arbitration.loserEvidence.length === 0 &&
+        a0.arbitration.note && a0.arbitration.note.includes('仲裁场未分胜负'));
+      check('给出首个驱动分歧证据（D0.7）', a0.collision && a0.collision.fieldLabel === 'D0.7' &&
+        a0.collision.actual === 0, JSON.stringify(a0.collision));
+      const bad = a0.trace.find((b) => b.i === a0.collision.globalBit);
+      check('分歧位线与可复核：A 发显性、B 发隐性、总线显性',
+        bad && bad.drives.A === 0 && bad.drives.B === 1 && bad.bus === 0, JSON.stringify(bad && bad.drives));
+      check('分歧后紧跟错误标志且无 ACK 场',
+        a0.trace.some((b) => b.i > a0.collision.globalBit && b.field === 'ERROR_FLAG' && b.bus === 0) &&
+        !a0.trace.some((b) => b.field === 'ACK'));
+      check('两位发送方首个尝试 TEC 均 +8',
+        a0.counterChanges.find((c) => c.node === 'A').tecAfter === 8 &&
+        a0.counterChanges.find((c) => c.node === 'B').tecAfter === 8);
+      check('首个尝试不是成功结局', a0.ok === false && a0.status === 'error' && a0.sharedTransmitters === null);
+      check('两条请求最终经自动重传成功（有观察者 C 应答）',
+        r.requests.every((q) => q.status === 'transmitted'));
+      check('轨迹覆盖分歧证据位与错误标志', a0.trace.some((b) => b.field === 'DATA') &&
+        a0.trace.some((b) => b.field === 'ERROR_FLAG'));
+    }
+
+    /* ---------- 阶段 4f：相同标识符 + DLC 差异 ---------- */
+    section('阶段 4f：相同标识符 · DLC 差异（分歧定位在 DLC 控制位）');
+    const dlcDiff = await api({
+      nodes: [{ name: 'A', tec: 0 }, { name: 'B', tec: 0 }, { name: 'C', tec: 0 }],
+      requests: [
+        { time: 0, node: 'A', id: '0x200', dlc: 0 },
+        { time: 0, node: 'B', id: '0x200', dlc: 1, data: '00' },
+      ],
+    });
+    check('API 返回 200', dlcDiff.status === 200);
+    {
+      const r = dlcDiff.body;
+      const a0 = r.attempts[0];
+      check('分歧证据位于 CONTROL/DLC.0', a0.collision &&
+        a0.collision.field === 'CONTROL' && a0.collision.fieldLabel === 'DLC.0',
+        JSON.stringify(a0.collision));
+      const bad = a0.trace.find((b) => b.i === a0.collision.globalBit);
+      check('DLC.0 驱动可复核：A=0(显性) B=1(隐性) 总线=0',
+        bad.drives.A === 0 && bad.drives.B === 1 && bad.bus === 0, JSON.stringify(bad.drives));
+      check('B 检到位错误并发错误标志，无正常 ACK',
+        a0.errors.some((e) => e.node === 'B' && e.kind === 'bit') &&
+        a0.trace.some((b) => b.field === 'ERROR_FLAG') && !a0.trace.some((b) => b.field === 'ACK'));
+      check('两条请求最终重传成功', r.requests.every((q) => q.status === 'transmitted'));
+    }
+
+    /* ---------- 阶段 4g：相同标识符 · 整帧完全一致 ---------- */
+    section('阶段 4g：相同标识符 · 整帧完全一致（共享同一物理帧，保留全部参与节点）');
+    const identical = await api({
+      nodes: [{ name: 'A', tec: 0 }, { name: 'B', tec: 0 }],
+      requests: [
+        { time: 0, node: 'A', id: '0x100', dlc: 1, data: 'AB' },
+        { time: 0, node: 'B', id: '0x100', dlc: 1, data: 'AB' },
+      ],
+    });
+    check('API 返回 200', identical.status === 200);
+    {
+      const r = identical.body;
+      check('只有一个物理帧尝试', r.attempts.length === 1);
+      const a0 = r.attempts[0];
+      check('整帧一致 → acknowledged，无分歧/错误标志',
+        a0.status === 'acknowledged' && a0.collision === null &&
+        !a0.trace.some((b) => b.field === 'ERROR_FLAG'));
+      check('共同发送方包含 A 与 B', a0.sharedTransmitters &&
+        a0.sharedTransmitters.map((s) => s.node).sort().join(',') === 'A,B');
+      const ack = a0.trace.find((b) => b.label === 'ACK_SLOT');
+      check('唯一 ACK 槽双方均驱动显性（互为应答者）', ack && ack.bus === 0 &&
+        ack.drives.A === 0 && ack.drives.B === 0, JSON.stringify(ack && ack.drives));
+      check('两条请求各自结局为成功并注明共享物理帧',
+        r.requests.length === 2 && r.requests.every((q) => q.status === 'transmitted' &&
+          q.reason.includes('共享同一物理帧')));
+      check('正常完成，TEC 保持 0', r.nodes.every((n) => n.tec === 0 && n.mode === 'active'));
+    }
+
+    /* ---------- 阶段 4h：持续冲突升级 bus-off（无第三方应答者） ---------- */
+    section('阶段 4h：相同 ID 内容冲突且无应答者 → 错误被动 / bus-off / 重传 / livelock 终止一致');
+    const collideOff = await api({
+      nodes: [{ name: 'A', tec: 0 }, { name: 'B', tec: 0 }],
+      requests: [
+        { time: 0, node: 'A', id: '0x100', dlc: 1, data: '00' },
+        { time: 0, node: 'B', id: '0x100', dlc: 1, data: '01' },
+      ],
+    });
+    check('API 返回 200', collideOff.status === 200);
+    {
+      const r = collideOff.body;
+      const a0 = r.attempts[0];
+      check('首个尝试在 D0.0 分歧且有错误标志', a0.collision &&
+        a0.collision.fieldLabel === 'D0.0' &&
+        a0.trace.some((b) => b.field === 'ERROR_FLAG'));
+      check('出现错误被动与 bus-off 事件',
+        r.events.some((e) => e.type === 'error-passive') &&
+        r.events.filter((e) => e.type === 'bus-off').length >= 2);
+      const aborts = r.events.filter((e) => e.type === 'collision-aborted');
+      check('第二次 bus-off 后两条请求按物理 livelock 终止', aborts.length === 2 &&
+        r.requests.every((q) => q.status === 'aborted'));
+    }
   } catch (e) {
     failures++;
     console.error('  ✗ 验收过程发生异常：', e);

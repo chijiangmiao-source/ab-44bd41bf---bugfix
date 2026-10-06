@@ -322,3 +322,139 @@ test('位轨迹包含全部场标签且按 SOF→…→IFS 顺序出现', () => 
     pos('CRC') < pos('CRC_DELIM') && pos('CRC_DELIM') < pos('ACK') && pos('ACK') < pos('EOF') &&
     pos('EOF') < pos('IFS'));
 });
+
+/* ---------- 同标识符仲裁平局：区分“标识符相同”与“整帧可共同发送” ---------- */
+
+test('同 ID 载荷首位差异：首个分歧位形成位错误、错误标志、TEC+8 与自动重传，无虚假成功', () => {
+  const r = Can.simulate({
+    nodes: [{ name: 'A' }, { name: 'B' }, { name: 'C' }],
+    requests: [
+      { time: 0, node: 'A', id: '0x100', dlc: 1, data: [0x00] }, // D0.7=0
+      { time: 0, node: 'B', id: '0x100', dlc: 1, data: [0x80] }, // D0.7=1
+    ],
+  });
+  assert.ok(r.ok);
+  const a0 = r.attempts[0];
+  // 仲裁场未分胜负：无虚假的仲裁败者证据
+  assert.equal(a0.arbitration.loserEvidence.length, 0);
+  assert.ok(a0.arbitration.note.includes('仲裁场未分胜负'));
+  assert.equal(a0.sharedTransmitters, null);
+  // 首个分歧证据：ID 0x100 仲裁含 1 个填充位，IDE 后再插 1 个填充位，故 D0.7 全局位为 21
+  assert.ok(a0.collision, '必须给出首个驱动分歧证据');
+  assert.equal(a0.collision.fieldLabel, 'D0.7');
+  assert.equal(a0.collision.globalBit, 21);
+  assert.equal(a0.collision.actual, 0); // 线与为显性
+  const bad = a0.trace.find((b) => b.i === a0.collision.globalBit);
+  assert.equal(bad.field, 'DATA');
+  assert.deepEqual(bad.drives, { A: 0, B: 1 });
+  // B 发隐性回读显性 → 位错误；随后 A 也在 B 的错误标志中检出错误
+  const bErr = a0.errors.find((e) => e.node === 'B' && e.kind === 'bit');
+  const aErr = a0.errors.find((e) => e.node === 'A');
+  assert.ok(bErr && aErr);
+  assert.equal(bErr.globalBit, a0.collision.globalBit);
+  assert.equal(a0.firstViolation.globalBit, a0.collision.globalBit);
+  // 错误标志紧随分歧位之后（显性主动标志）
+  const after = a0.trace.filter((b) => b.i > a0.collision.globalBit);
+  assert.equal(after[0].field, 'ERROR_FLAG');
+  assert.ok(a0.trace.some((b) => b.field === 'ERROR_FLAG' && b.bus === 0));
+  // 无 ACK 成功结局
+  assert.equal(a0.ok, false);
+  assert.equal(a0.status, 'error');
+  assert.ok(!a0.trace.some((b) => b.field === 'ACK'));
+  // 双方 TEC 均 +8（首个尝试）
+  assert.equal(a0.counterChanges.find((c) => c.node === 'A').tecAfter, 8);
+  assert.equal(a0.counterChanges.find((c) => c.node === 'B').tecAfter, 8);
+  // 两条请求最终都经后续重传成功（存在观察者 C 可应答）
+  assert.ok(r.requests.every((q) => q.status === 'transmitted'));
+  const last = r.attempts[r.attempts.length - 1];
+  assert.equal(last.status, 'acknowledged');
+});
+
+test('同 ID DLC 差异：分歧定位在 DLC 控制位而非载荷', () => {
+  const r = Can.simulate({
+    nodes: [{ name: 'A' }, { name: 'B' }, { name: 'C' }],
+    requests: [
+      { time: 0, node: 'A', id: '0x100', dlc: 0 },
+      { time: 0, node: 'B', id: '0x100', dlc: 1, data: [0x00] },
+    ],
+  });
+  const a0 = r.attempts[0];
+  assert.ok(a0.collision);
+  assert.equal(a0.collision.field, 'CONTROL');
+  assert.equal(a0.collision.fieldLabel, 'DLC.0'); // 0000 vs 0001
+  const bit = a0.trace.find((b) => b.i === a0.collision.globalBit);
+  assert.deepEqual(bit.drives, { A: 0, B: 1 });
+  assert.equal(a0.ok, false);
+  assert.ok(a0.errors.some((e) => e.node === 'B' && e.kind === 'bit'));
+  assert.ok(r.requests.every((q) => q.status === 'transmitted'));
+});
+
+test('同 ID 整帧完全一致：共享同一物理帧，页面保留全部参与节点与各自成功结局', () => {
+  const r = Can.simulate({
+    nodes: [{ name: 'A' }, { name: 'B' }],
+    requests: [
+      { time: 0, node: 'A', id: '0x100', dlc: 1, data: [0xAB] },
+      { time: 0, node: 'B', id: '0x100', dlc: 1, data: 'AB' },
+    ],
+  });
+  assert.equal(r.attempts.length, 1);
+  const a0 = r.attempts[0];
+  assert.equal(a0.status, 'acknowledged');
+  assert.equal(a0.collision, null);
+  assert.equal(a0.arbitration.loserEvidence.length, 0);
+  assert.ok(a0.sharedTransmitters && a0.sharedTransmitters.length === 2);
+  // 唯一物理帧，双方在 ACK 槽互为应答者（显性）
+  const ack = a0.trace.find((b) => b.label === 'ACK_SLOT');
+  assert.equal(ack.bus, 0);
+  assert.equal(ack.drives.A, 0);
+  assert.equal(ack.drives.B, 0);
+  assert.ok(!a0.trace.some((b) => b.field === 'ERROR_FLAG'));
+  // 各自请求结局均为成功且注明共同发送
+  for (const q of r.requests) {
+    assert.equal(q.status, 'transmitted');
+    assert.ok(q.reason.includes('共享同一物理帧'));
+    assert.equal(q.attempts.length, 1);
+  }
+  // 正常完成：TEC 维持 0
+  assert.ok(r.nodes.every((n) => n.tec === 0 && n.mode === 'active'));
+});
+
+test('同 ID 内容冲突且无其他应答者：反复重传升级错误被动与 bus-off，恢复后内容不变仍冲突则终止', () => {
+  const r = Can.simulate({
+    nodes: [{ name: 'A', tec: 0 }, { name: 'B', tec: 0 }],
+    requests: [
+      { time: 0, node: 'A', id: '0x100', dlc: 1, data: [0x00] },
+      { time: 0, node: 'B', id: '0x100', dlc: 1, data: [0x01] },
+    ],
+  });
+  // 存在错误被动迁移与两次 bus-off
+  assert.ok(r.events.some((e) => e.type === 'error-passive'));
+  const offs = r.events.filter((e) => e.type === 'bus-off');
+  assert.ok(offs.length >= 2);
+  // 第二次 bus-off 后按 livelock 终止两条请求
+  const aborts = r.events.filter((e) => e.type === 'collision-aborted');
+  assert.equal(aborts.length, 2);
+  for (const q of r.requests) assert.equal(q.status, 'aborted');
+  // 首个尝试仍须有可复核的分歧证据与错误标志
+  assert.equal(r.attempts[0].collision.fieldLabel, 'D0.0');
+  assert.ok(r.attempts[0].trace.some((b) => b.field === 'ERROR_FLAG'));
+});
+
+test('同 ID 内容冲突存在第三方观察者时：被动错误方隐性标志使冲突收敛，后续一致帧共享物理帧', () => {
+  const r = Can.simulate({
+    nodes: [{ name: 'A' }, { name: 'B' }, { name: 'C' }],
+    requests: [
+      { time: 0, node: 'A', id: '0x100', dlc: 1, data: [0x00] },
+      { time: 0, node: 'B', id: '0x100', dlc: 1, data: [0x80] }, // 首次冲突
+      { time: 20000, node: 'A', id: '0x100', dlc: 1, data: [0x00] },
+      { time: 20000, node: 'B', id: '0x100', dlc: 1, data: [0x00] }, // 双方后改一致
+    ],
+  });
+  // 冲突经错误被动隐性标志收敛，无需 bus-off，更无 livelock 终止
+  assert.ok(!r.events.some((e) => e.type === 'collision-aborted'));
+  assert.ok(r.requests.every((q) => q.status === 'transmitted'));
+  // 后两条内容一致的请求在 t=20000 共享同一物理帧
+  const later = r.attempts.find((a) => a.startBit >= 20000);
+  assert.ok(later);
+  assert.equal(later.sharedTransmitters.length, 2);
+});

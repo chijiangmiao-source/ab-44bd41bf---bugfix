@@ -279,6 +279,8 @@ function eventText(ev, r) {
       return `⛔ ${at} 节点 <b>${escapeHtml(ev.node)}</b> 的请求 #${ev.requestIndex} 被<b>拒绝</b>（bus-off）`;
     case 'aborted':
       return `⛔ ${at} 节点 <b>${escapeHtml(ev.node)}</b> 的请求 #${ev.requestIndex} 中止`;
+    case 'collision-aborted':
+      return `⛔ ${at} 节点 <b>${escapeHtml(ev.node)}</b> 的请求 #${ev.requestIndex} 与同标识符节点帧内容持续不一致，反复 bus-off 后按物理 livelock 终止（首个分歧位 ${ev.globalBit}）`;
     default: return JSON.stringify(ev);
   }
 }
@@ -290,18 +292,25 @@ function renderAttemptCard(a, r) {
   const shared = a.sharedTransmitters?.length > 1
     ? a.sharedTransmitters.map((s) => `${s.node}（请求 #${s.requestIndex}）`).join('、')
     : null;
+  const joint = a.jointTransmitters?.length > 1 ? a.jointTransmitters : null;
+  const headStatus = a.ok
+    ? { cls: 'ok', text: '正常应答完成' }
+    : a.status === 'partial'
+      ? { cls: 'warn', text: '部分共同发送成功 / 内容分歧方错误重传' }
+      : { cls: 'bad', text: '检出错误并重传' };
   card.innerHTML = `
     <div class="att-head">
       <span class="seq">帧尝试 #${a.index}${a.retransmit ? '（自动重传）' : ''}</span>
       <span class="winner">🏆 ${escapeHtml(a.winner)}</span>
       <span class="frameid">ID=${a.frameIdHex}　DLC=${a.dlc}　数据=[${dataHex}]　CRC=${a.crc}</span>
-      <span class="status ${a.ok ? 'ok' : 'bad'}">${a.ok ? '正常应答完成' : '检出错误并重传'}</span>
+      <span class="status ${headStatus.cls}">${headStatus.text}</span>
     </div>
     <div class="att-body">
       <div class="kv-grid">
-        <div class="kv"><span class="k">同刻候选：</span>${a.contenders.map((c) => `${escapeHtml(c.node)}(${c.idHex})`).join('、')}</div>
+        <div class="kv"><span class="k">同刻候选：</span>${a.contenders.map((c) => `${escapeHtml(c.node)}(${c.idHex},DLC=${c.dlc})`).join('、')}</div>
         <div class="kv"><span class="k">仲裁结果：</span>${escapeHtml(a.arbitration.winner)} 获胜（低标识符优先）${a.arbitration.note ? '；' + escapeHtml(a.arbitration.note) : ''}</div>
-        ${shared ? `<div class="kv"><span class="k">共同发送：</span>${escapeHtml(shared)}</div>` : ''}
+        ${joint ? `<div class="kv"><span class="k">仲裁平局共同驱动：</span>${joint.map((j) => `${escapeHtml(j.node)}（请求 #${j.requestIndex}，DLC=${j.dlc}，数据=[${(j.data || []).map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ') || '—'}]）<span class="jtag ${j.ok ? 'j-ok' : 'j-err'}">${j.ok ? '本方应答成功' : '本方检出错误'}</span>`).join('；')}</div>` : ''}
+        ${shared ? `<div class="kv"><span class="k">共同发送：</span>${escapeHtml(shared)}（整帧内容完全一致，共享同一物理帧，各自获得成功结局）</div>` : ''}
       </div>
       <div class="evidence-wrap"></div>
       <h5 class="muted">错误计数变化</h5>
@@ -322,6 +331,16 @@ function renderAttemptCard(a, r) {
       <div>${escapeHtml(ev.detail)}</div>
       <div class="loc">全局位序号=${ev.globalBit}　场位置=${ev.label}　该节点发送=${bitTxt(ev.sent)}　总线=${bitTxt(ev.bus)}</div>`;
     d.querySelector('.loc').addEventListener('click', () => openTrace(a, ev.globalBit));
+    ew.appendChild(d);
+  }
+  // 仲裁平局后首个驱动分歧证据
+  if (a.collision) {
+    const d = document.createElement('div');
+    d.className = 'evidence collision';
+    d.innerHTML = `<h5>仲裁平局后首个驱动分歧 · ${escapeHtml(a.collision.fieldLabel)}（${escapeHtml(a.collision.field)}）</h5>
+      <div>${escapeHtml(a.collision.detail)}</div>
+      <div class="loc">全局位序号=${a.collision.globalBit}　场=${a.collision.field}/${escapeHtml(a.collision.fieldLabel)}　分歧方期望发送=${bitTxt(a.collision.expected)}　总线=${bitTxt(a.collision.actual)}　→ 错误标志（无正常 ACK，TEC+8，帧间隔后自动重传）</div>`;
+    d.querySelector('.loc').addEventListener('click', () => openTrace(a, a.collision.globalBit));
     ew.appendChild(d);
   }
   // 错误/首个违规
@@ -490,6 +509,17 @@ const SAMPLES = {
       { time: 1000, node: 'CAM-A', id: '0x200', dlc: 0, data: '', error: null },
     ],
   },
+  tie: {
+    nodes: [{ name: 'CAM-A', tec: 0 }, { name: 'CAM-B', tec: 0 }, { name: 'RADAR', tec: 0 }],
+    requests: [
+      // 同 ID 但载荷首位不同：仲裁场分不出胜负，D0.7 处形成首个驱动分歧错误
+      { time: 0, node: 'CAM-A', id: '0x100', dlc: 1, data: '00', error: null },
+      { time: 0, node: 'CAM-B', id: '0x100', dlc: 1, data: '80', error: null },
+      // 后续时刻两节点整帧完全一致：共享同一物理帧共同发送
+      { time: 800, node: 'CAM-A', id: '0x100', dlc: 1, data: '00', error: null },
+      { time: 800, node: 'CAM-B', id: '0x100', dlc: 1, data: '00', error: null },
+    ],
+  },
 };
 
 function loadSample(key) {
@@ -501,6 +531,7 @@ function loadSample(key) {
 $('#btn-sample-normal').addEventListener('click', () => loadSample('normal'));
 $('#btn-sample-passive').addEventListener('click', () => loadSample('passive'));
 $('#btn-sample-busoff').addEventListener('click', () => loadSample('busoff'));
+$('#btn-sample-tie').addEventListener('click', () => loadSample('tie'));
 
 /* ------------------------- 工具 ------------------------- */
 

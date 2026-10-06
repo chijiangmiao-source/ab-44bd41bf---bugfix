@@ -132,9 +132,15 @@ td .tag { font-size: 10px; padding: 1px 7px; border-radius: 10px; }
 
 .evidence { border: 1px solid rgba(255,107,107,.4); background: rgba(255,107,107,.06); border-radius: 6px; padding: 8px 10px; margin: 8px 0; font-size: 12px; }
 .evidence.arbitration { border-color: rgba(240,180,41,.5); background: rgba(240,180,41,.06); }
+.evidence.collision { border-color: rgba(255,107,107,.7); background: rgba(255,107,107,.1); }
 .evidence h5 { margin: 0 0 4px; font-size: 11px; color: var(--err); text-transform: uppercase; }
 .evidence.arbitration h5 { color: var(--warn); }
-.evidence .loc { font-family: ui-monospace, monospace; color: var(--warn); }
+.evidence .loc { font-family: ui-monospace, monospace; color: var(--warn); cursor: pointer; }
+.jtag { font-size: 10px; padding: 0 6px; border-radius: 9px; margin-left: 4px; white-space: nowrap; }
+.jtag.j-ok { background: rgba(67,209,122,.18); color: var(--ok); }
+.jtag.j-err { background: rgba(255,107,107,.18); color: var(--err); }
+.status.warn { background: rgba(240,180,41,.18); color: var(--warn); }
+.event-line.collision-aborted b { color: var(--err); }
 
 .cc-table { width: 100%; font-size: 11px; margin: 6px 0 10px; }
 .cc-table th, .cc-table td { padding: 3px 6px; }
